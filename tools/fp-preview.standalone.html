@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>FpBrowser 指纹引擎预览（桌面验证工具）</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px; background: #0F1115; color: #E6E8ED;
+         font: 13px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  .tip { color: #8A92A3; font-size: 12px; margin-bottom: 14px; }
+  .card { background: #161A22; border: 1px solid #232936; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  select, textarea, button { font: inherit; }
+  select, textarea { background: #0F1115; color: #E6E8ED; border: 1px solid #2A3140; border-radius: 8px; padding: 6px 8px; }
+  textarea { width: 100%; height: 160px; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+  button { background: #5B8DEF; color: #fff; border: none; border-radius: 8px; padding: 7px 14px; cursor: pointer; }
+  button.ghost { background: #232936; color: #B4BAC6; }
+  button:disabled { opacity: .5; cursor: default; }
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  td, th { padding: 5px 8px; border-bottom: 1px solid #1F2430; text-align: left; vertical-align: top; }
+  th { color: #8A92A3; font-weight: 500; font-size: 12px; }
+  td.v { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; word-break: break-all; max-width: 300px; }
+  .changed { color: #3FB68B; }
+  .same { color: #8A92A3; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<h1>FpBrowser 指纹引擎预览</h1>
+<div class="tip">
+  在桌面 Chrome 中直接运行 app/src/main/res/raw/fp_inject.js：选择模板后点击「注入」，
+  本页 navigator / screen / 时区 / WebGL / Canvas 等值会被真实改写，可与「注入前」对照。
+  刷新页面恢复原始状态。安卓真机上的效果以 App 内「指纹与 IP 检测」页为准。
+</div>
+
+<div class="card">
+  <div class="row">
+    <label>模板：
+      <select id="tpl">
+        <option value="windowsChrome">Windows · Chrome</option>
+        <option value="macChrome">macOS · Chrome</option>
+        <option value="macSafari">macOS · Safari</option>
+        <option value="linuxChrome">Linux · Chrome</option>
+        <option value="androidChrome">Android · Chrome</option>
+        <option value="iphoneSafari">iPhone · Safari</option>
+      </select>
+    </label>
+    <button id="inject">注入并检测</button>
+    <button class="ghost" onclick="location.reload()">恢复原始</button>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <button class="ghost" id="toggle-json">编辑配置 JSON</button>
+  </div>
+  <div id="json-box" style="display:none; margin-top:10px">
+    <textarea id="json" spellcheck="false"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button id="apply-json">应用 JSON 并注入</button>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <table>
+    <thead><tr><th style="width:26%">检测项</th><th style="width:37%">注入前</th><th style="width:37%">注入后</th></tr></thead>
+    <tbody id="result"></tbody>
+  </table>
+</div>
+
+<script>/*
+ * FpBrowser 开发工具用指纹模板（与 app/src/main/java/com/fpbrowser/app/data/Presets.kt 保持一致）。
+ * 用途：
+ *   - tools/test-inject.mjs        ：Node 环境下验证注入引擎
+ *   - tools/fp-preview.standalone.html：桌面浏览器中预览注入效果
+ * 注意：修改 Kotlin 侧模板后请同步更新本文件。
+ */
+(function (root, factory) {
+  var templates = factory();
+  if (typeof module !== 'undefined' && module.exports) module.exports = templates;
+  if (root) root.FP_TEMPLATES = templates;
+})(typeof self !== 'undefined' ? self : globalThis, function () {
+  'use strict';
+
+  var CHROME_FULL = '131.0.6778.86';
+
+  var DESKTOP_PLUGINS = [
+    { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+    { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+    { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+    { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+    { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }
+  ];
+
+  function chromeUaData(platform, platformVersion, mobile, full) {
+    return {
+      brands: [
+        { brand: 'Chromium', version: full },
+        { brand: 'Google Chrome', version: full },
+        { brand: 'Not=A?Brand', version: '24.0.0.0' }
+      ],
+      mobile: mobile,
+      platform: platform,
+      platformVersion: platformVersion,
+      fullVersion: full
+    };
+  }
+
+  function base(overrides) {
+    var d = {
+      canvasMode: 'noise',
+      audioMode: 'noise',
+      webRtcMode: 'default',
+      doNotTrack: null,
+      spoofViewport: true,
+      browser: 'chromium',
+      screenX: 0,
+      screenY: 0,
+      downlink: 10,
+      rtt: 50,
+      pdfViewerEnabled: true,
+      innerWidth: 0,
+      innerHeight: 0
+    };
+    for (var k in overrides) d[k] = overrides[k];
+    return d;
+  }
+
+  return {
+    windowsChrome: function () {
+      var ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+      return base({
+        userAgent: ua,
+        appVersion: ua.replace('Mozilla/', ''),
+        platform: 'Win32',
+        vendor: 'Google Inc.',
+        language: 'en-US',
+        languages: ['en-US', 'en'],
+        timezone: 'America/New_York',
+        screenWidth: 1920, screenHeight: 1080,
+        availWidth: 1920, availHeight: 1040,
+        colorDepth: 24, devicePixelRatio: 1.0,
+        hardwareConcurrency: 8, deviceMemory: 8, maxTouchPoints: 0,
+        webglVendor: 'Google Inc. (Intel)',
+        webglRenderer: 'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        canvasNoiseSeed: 'canvas-test-windows',
+        audioNoiseSeed: 'audio-test-windows',
+        plugins: DESKTOP_PLUGINS,
+        orientation: 'landscape-primary',
+        userAgentData: chromeUaData('Windows', '15.0.0', false, CHROME_FULL),
+        innerWidth: 1920, innerHeight: 950
+      });
+    },
+
+    macChrome: function () {
+      var ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+      return base({
+        userAgent: ua,
+        appVersion: ua.replace('Mozilla/', ''),
+        platform: 'MacIntel',
+        vendor: 'Google Inc.',
+        language: 'en-US',
+        languages: ['en-US', 'en'],
+        timezone: 'America/Los_Angeles',
+        screenWidth: 1680, screenHeight: 1050,
+        availWidth: 1680, availHeight: 1025,
+        colorDepth: 30, devicePixelRatio: 2.0,
+        hardwareConcurrency: 8, deviceMemory: 8, maxTouchPoints: 0,
+        webglVendor: 'Google Inc. (Apple)',
+        webglRenderer: 'ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)',
+        canvasNoiseSeed: 'canvas-test-macchrome',
+        audioNoiseSeed: 'audio-test-macchrome',
+        plugins: DESKTOP_PLUGINS,
+        orientation: 'landscape-primary',
+        userAgentData: chromeUaData('macOS', '14.6.1', false, CHROME_FULL),
+        innerWidth: 1680, innerHeight: 965
+      });
+    },
+
+    macSafari: function () {
+      var ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15';
+      return base({
+        userAgent: ua,
+        appVersion: ua.replace('Mozilla/', ''),
+        platform: 'MacIntel',
+        vendor: 'Apple Computer, Inc.',
+        language: 'en-US',
+        languages: ['en-US', 'en'],
+        timezone: 'Europe/London',
+        screenWidth: 1440, screenHeight: 900,
+        availWidth: 1440, availHeight: 875,
+        colorDepth: 30, devicePixelRatio: 2.0,
+        hardwareConcurrency: 8, deviceMemory: 8, maxTouchPoints: 0,
+        webglVendor: 'Apple Inc.',
+        webglRenderer: 'Apple GPU',
+        canvasNoiseSeed: 'canvas-test-macsafari',
+        audioNoiseSeed: 'audio-test-macsafari',
+        plugins: [{ name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }],
+        browser: 'webkit',
+        orientation: 'landscape-primary',
+        userAgentData: null,
+        innerWidth: 1440, innerHeight: 830
+      });
+    },
+
+    linuxChrome: function () {
+      var ua = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+      return base({
+        userAgent: ua,
+        appVersion: ua.replace('Mozilla/', ''),
+        platform: 'Linux x86_64',
+        vendor: 'Google Inc.',
+        language: 'en-US',
+        languages: ['en-US', 'en'],
+        timezone: 'Europe/Berlin',
+        screenWidth: 1920, screenHeight: 1080,
+        availWidth: 1920, availHeight: 1050,
+        colorDepth: 24, devicePixelRatio: 1.0,
+        hardwareConcurrency: 12, deviceMemory: 8, maxTouchPoints: 0,
+        webglVendor: 'Google Inc. (NVIDIA)',
+        webglRenderer: 'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        canvasNoiseSeed: 'canvas-test-linux',
+        audioNoiseSeed: 'audio-test-linux',
+        plugins: DESKTOP_PLUGINS,
+        orientation: 'landscape-primary',
+        userAgentData: chromeUaData('Linux', '6.8.0', false, CHROME_FULL),
+        innerWidth: 1920, innerHeight: 960
+      });
+    },
+
+    androidChrome: function () {
+      var ua = 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
+      return base({
+        userAgent: ua,
+        appVersion: ua.replace('Mozilla/', ''),
+        platform: 'Linux armv8l',
+        vendor: 'Google Inc.',
+        language: 'ja-JP',
+        languages: ['ja-JP', 'ja', 'en-US', 'en'],
+        timezone: 'Asia/Tokyo',
+        screenWidth: 412, screenHeight: 915,
+        availWidth: 412, availHeight: 915,
+        colorDepth: 24, devicePixelRatio: 2.625,
+        hardwareConcurrency: 8, deviceMemory: 8, maxTouchPoints: 5,
+        webglVendor: 'Qualcomm',
+        webglRenderer: 'ANGLE (Qualcomm, Adreno (TM) 730, OpenGL ES 3.2)',
+        canvasNoiseSeed: 'canvas-test-android',
+        audioNoiseSeed: 'audio-test-android',
+        plugins: [],
+        spoofViewport: false,
+        orientation: 'portrait-primary',
+        userAgentData: chromeUaData('Android', '14.0.0', true, CHROME_FULL),
+        innerWidth: 412, innerHeight: 915
+      });
+    },
+
+    iphoneSafari: function () {
+      var ua = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1';
+      return base({
+        userAgent: ua,
+        appVersion: ua.replace('Mozilla/', ''),
+        platform: 'iPhone',
+        vendor: 'Apple Computer, Inc.',
+        language: 'en-US',
+        languages: ['en-US', 'en'],
+        timezone: 'America/New_York',
+        screenWidth: 390, screenHeight: 844,
+        availWidth: 390, availHeight: 844,
+        colorDepth: 32, devicePixelRatio: 3.0,
+        hardwareConcurrency: 8, deviceMemory: 8, maxTouchPoints: 5,
+        webglVendor: 'Apple Inc.',
+        webglRenderer: 'Apple GPU',
+        canvasNoiseSeed: 'canvas-test-iphone',
+        audioNoiseSeed: 'audio-test-iphone',
+        plugins: [],
+        spoofViewport: false,
+        browser: 'webkit',
+        orientation: 'portrait-primary',
+        userAgentData: null,
+        innerWidth: 390, innerHeight: 664
+      });
+    }
+  };
+});
+</script>
+<script>window.FP_ENGINE_SRC = "/*\n * FpBrowser · 指纹注入引擎\n * ------------------------------------------------------------------\n * 注入时机：document-start（WebViewCompat.addDocumentStartJavaScript），\n *           早于页面自身脚本执行，覆盖所有 frame。\n * 配置来源：window.__FP_CONFIG__（由宿主 App 在同一批注入的 prelude 脚本中写入，\n *           并合并 window.name 中的 \"__FP_OVERRIDE__\" 临时覆盖，用于\"请求桌面版\"等）。\n *\n * 设计原则：\n * 1. 只覆盖、不新增全局泄漏——所有补丁集中在 IIFE 内；\n * 2. Function.prototype.toString 伪装，使补丁函数呈现 [native code]；\n * 3. 噪声由种子驱动，同一种子跨会话产生同一结果（保证指纹稳定、跨站一致）。\n *\n * 平台限制（无法在 JS 层解决，详见 README）：\n * - Sec-CH-UA 等 User-Agent Client Hints 请求头由 Chromium 网络栈发出，JS 无法覆盖；\n * - CSS 媒体查询按物理视口计算，JS 覆盖 innerWidth 不影响 @media；\n * - 字体列表取真实系统字体。\n */\n(function () {\n  'use strict';\n\n  var CFG = {};\n  try {\n    CFG = window.__FP_CONFIG__ || {};\n  } catch (e) {}\n\n  var IS_DESKTOP = CFG.platform === 'Win32' || CFG.platform === 'MacIntel' || CFG.platform === 'Linux x86_64';\n  var IS_CHROMIUM = CFG.browser !== 'webkit';\n  var HAS_TOUCH = !!(CFG.maxTouchPoints && CFG.maxTouchPoints > 0);\n\n  /* ============================ 基础工具 ============================ */\n\n  var PATCHED = new WeakSet();\n  function mark(fn) { try { PATCHED.add(fn); } catch (e) {} return fn; }\n\n  function defValue(obj, prop, value, enumerable) {\n    try {\n      Object.defineProperty(obj, prop, {\n        get: mark(function () { return value; }),\n        set: mark(function () {}),\n        configurable: true,\n        enumerable: enumerable !== false\n      });\n    } catch (e) {}\n  }\n\n  function defFn(obj, prop, fn) {\n    try {\n      Object.defineProperty(obj, prop, {\n        value: mark(fn), writable: true, configurable: true, enumerable: false\n      });\n    } catch (e) {}\n  }\n\n  function hashStr(s) {\n    var h = 2166136261 >>> 0;\n    s = String(s);\n    for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }\n    return h >>> 0;\n  }\n\n  function mulberry32(a) {\n    return function () {\n      a |= 0; a = (a + 0x6D2B79F5) | 0;\n      var t = Math.imul(a ^ (a >>> 15), 1 | a);\n      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;\n      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;\n    };\n  }\n\n  /* ============ 0. Function.prototype.toString 伪装（最先执行） ============ */\n\n  (function () {\n    var origToString = Function.prototype.toString;\n    var fake = function toString() {\n      if (PATCHED.has(this)) {\n        var n = '';\n        try { n = this.name || ''; } catch (e) {}\n        return 'function ' + n + '() { [native code] }';\n      }\n      return origToString.call(this);\n    };\n    Object.defineProperty(Function.prototype, 'toString', {\n      value: mark(fake), writable: true, configurable: true\n    });\n  })();\n\n  /* ============================ 1. navigator ============================ */\n\n  var nav = navigator;\n  if (CFG.userAgent) defValue(nav, 'userAgent', CFG.userAgent);\n  if (CFG.appVersion) defValue(nav, 'appVersion', CFG.appVersion);\n  if (CFG.platform) defValue(nav, 'platform', CFG.platform);\n  if (CFG.vendor) defValue(nav, 'vendor', CFG.vendor);\n  defValue(nav, 'product', 'Gecko');\n  defValue(nav, 'productSub', '20030107');\n  defValue(nav, 'vendorSub', '');\n  if (CFG.language) defValue(nav, 'language', CFG.language);\n  if (CFG.languages && CFG.languages.length) defValue(nav, 'languages', CFG.languages.slice());\n  if (typeof CFG.hardwareConcurrency === 'number' && CFG.hardwareConcurrency > 0) {\n    defValue(nav, 'hardwareConcurrency', CFG.hardwareConcurrency);\n  }\n  if (IS_CHROMIUM && typeof CFG.deviceMemory === 'number' && CFG.deviceMemory > 0) {\n    defValue(nav, 'deviceMemory', CFG.deviceMemory);\n  }\n  defValue(nav, 'maxTouchPoints', HAS_TOUCH ? (CFG.maxTouchPoints || 1) : 0);\n  defValue(nav, 'msMaxTouchPoints', HAS_TOUCH ? (CFG.maxTouchPoints || 1) : 0);\n  defValue(nav, 'webdriver', false);\n  defValue(nav, 'pdfViewerEnabled', CFG.pdfViewerEnabled !== false);\n  defValue(nav, 'cookieEnabled', true);\n  if (CFG.doNotTrack) defValue(nav, 'doNotTrack', CFG.doNotTrack);\n  defFn(nav, 'javaEnabled', function javaEnabled() { return false; });\n\n  /* ---- 插件 / MIME 类型（桌面 Chromium 特征） ---- */\n  function makePluginArray(list) {\n    var items = [];\n    for (var i = 0; i < list.length; i++) {\n      items.push({\n        name: list[i].name,\n        filename: list[i].filename,\n        description: list[i].description,\n        length: 1,\n        item: function () { return null; },\n        namedItem: function () { return null; }\n      });\n    }\n    var arr = items.slice();\n    arr.item = function (i) { return (typeof i === 'number' && items[i]) || null; };\n    arr.namedItem = function (n) {\n      for (var j = 0; j < items.length; j++) if (items[j].name === n) return items[j];\n      return null;\n    };\n    arr.refresh = function () {};\n    try { arr[Symbol.toStringTag] = 'PluginArray'; } catch (e) {}\n    return arr;\n  }\n\n  function makeMimeTypeArray(list) {\n    var items = [];\n    for (var i = 0; i < list.length; i++) {\n      items.push({\n        type: list[i].type,\n        suffixes: list[i].suffixes,\n        description: list[i].description,\n        enabledPlugin: null\n      });\n    }\n    var arr = items.slice();\n    arr.item = function (i) { return (typeof i === 'number' && items[i]) || null; };\n    arr.namedItem = function (n) {\n      for (var j = 0; j < items.length; j++) if (items[j].type === n) return items[j];\n      return null;\n    };\n    try { arr[Symbol.toStringTag] = 'MimeTypeArray'; } catch (e) {}\n    return arr;\n  }\n\n  if (CFG.plugins && CFG.plugins.length) defValue(nav, 'plugins', makePluginArray(CFG.plugins), false);\n  if (CFG.mimeTypes && CFG.mimeTypes.length) defValue(nav, 'mimeTypes', makeMimeTypeArray(CFG.mimeTypes), false);\n\n  /* ---- User-Agent Client Hints（JS 层） ---- */\n  if (CFG.userAgentData && IS_CHROMIUM) {\n    var uad = {\n      brands: CFG.userAgentData.brands,\n      mobile: !!CFG.userAgentData.mobile,\n      platform: CFG.userAgentData.platform,\n      getHighEntropyValues: function getHighEntropyValues(hints) {\n        return Promise.resolve({\n          architecture: 'x86',\n          bitness: '64',\n          model: '',\n          platformVersion: CFG.userAgentData.platformVersion || '15.0.0',\n          uaFullVersion: CFG.userAgentData.fullVersion || '',\n          fullVersionList: CFG.userAgentData.brands,\n          wow64: false,\n          mobile: !!CFG.userAgentData.mobile,\n          platform: CFG.userAgentData.platform,\n          brands: CFG.userAgentData.brands\n        });\n      },\n      toJSON: function toJSON() {\n        return {\n          brands: CFG.userAgentData.brands,\n          mobile: !!CFG.userAgentData.mobile,\n          platform: CFG.userAgentData.platform\n        };\n      }\n    };\n    defValue(nav, 'userAgentData', uad);\n  }\n\n  /* ---- NetworkInformation（Chromium） ---- */\n  if (IS_CHROMIUM) {\n    defValue(nav, 'connection', {\n      effectiveType: '4g',\n      downlink: typeof CFG.downlink === 'number' ? CFG.downlink : 10,\n      rtt: typeof CFG.rtt === 'number' ? CFG.rtt : 50,\n      saveData: false,\n      onchange: null,\n      addEventListener: function addEventListener() {},\n      removeEventListener: function removeEventListener() {},\n      dispatchEvent: function dispatchEvent() { return true; }\n    });\n  }\n\n  /* ---- Battery API（Safari 没有，补一个稳定值） ---- */\n  if (!nav.getBattery) {\n    defFn(nav, 'getBattery', function getBattery() {\n      return Promise.resolve({\n        level: 0.72 + (hashStr(CFG.userAgent || 'fp') % 20) / 100,\n        charging: true,\n        chargingTime: 0,\n        dischargingTime: Infinity,\n        onlevelchange: null,\n        onchargingchange: null,\n        addEventListener: function addEventListener() {},\n        removeEventListener: function removeEventListener() {},\n        dispatchEvent: function dispatchEvent() { return true; }\n      });\n    });\n  }\n\n  /* ============================ 2. screen / 窗口几何 ============================ */\n\n  var scr = window.screen;\n  if (scr) {\n    if (CFG.screenWidth) defValue(scr, 'width', CFG.screenWidth | 0);\n    if (CFG.screenHeight) defValue(scr, 'height', CFG.screenHeight | 0);\n    defValue(scr, 'availWidth', (CFG.availWidth || CFG.screenWidth || 0) | 0);\n    defValue(scr, 'availHeight', (CFG.availHeight || CFG.screenHeight || 0) | 0);\n    defValue(scr, 'availTop', 0);\n    defValue(scr, 'availLeft', 0);\n    defValue(scr, 'top', 0);\n    defValue(scr, 'left', 0);\n    if (CFG.colorDepth) {\n      defValue(scr, 'colorDepth', CFG.colorDepth | 0);\n      defValue(scr, 'pixelDepth', CFG.colorDepth | 0);\n    }\n    if (scr.orientation) {\n      defValue(scr.orientation, 'type', CFG.orientation || 'landscape-primary');\n      defValue(scr.orientation, 'angle', 0);\n    }\n  }\n\n  if (typeof CFG.devicePixelRatio === 'number') {\n    defValue(window, 'devicePixelRatio', CFG.devicePixelRatio);\n  }\n\n  if (IS_DESKTOP && CFG.spoofViewport !== false) {\n    var aw = (CFG.availWidth || CFG.screenWidth || 1920) | 0;\n    var ah = (CFG.availHeight || CFG.screenHeight || 1080) | 0;\n    defValue(window, 'outerWidth', aw);\n    defValue(window, 'outerHeight', ah);\n    defValue(window, 'innerWidth', (CFG.innerWidth || aw) | 0);\n    defValue(window, 'innerHeight', (CFG.innerHeight || (ah - 90)) | 0);\n    defValue(window, 'screenX', (CFG.screenX || 0) | 0);\n    defValue(window, 'screenY', (CFG.screenY || 0) | 0);\n    defValue(window, 'pageXOffset', 0);\n    defValue(window, 'pageYOffset', 0);\n  }\n\n  if (HAS_TOUCH) {\n    defValue(window, 'ontouchstart', function ontouchstart() {});\n  } else {\n    try { delete window.ontouchstart; } catch (e) {}\n  }\n\n  /* ---- matchMedia：指针 / 悬停能力 ---- */\n  (function () {\n    var orig = window.matchMedia;\n    if (typeof orig !== 'function') return;\n    function spoof(q) {\n      if (typeof q !== 'string') return orig.call(window, q);\n      var ptr = HAS_TOUCH ? 'coarse' : 'fine';\n      var hov = HAS_TOUCH ? 'none' : 'hover';\n      var s = q;\n      s = s.replace(/\\(\\s*(any-)?pointer\\s*:\\s*(coarse|fine)\\s*\\)/g,\n        function (m, any) { return '(' + (any || '') + 'pointer: ' + ptr + ')'; });\n      s = s.replace(/\\(\\s*(any-)?hover\\s*:\\s*(none|hover)\\s*\\)/g,\n        function (m, any) { return '(' + (any || '') + 'hover: ' + hov + ')'; });\n      return orig.call(window, s);\n    }\n    defFn(window, 'matchMedia', spoof);\n  })();\n\n  /* ==================== 3. 时区（Intl + Date） ==================== */\n\n  var TZ = CFG.timezone || 'UTC';\n  var offsetCache = {};\n  var origGetTimezoneOffset = Date.prototype.getTimezoneOffset;\n\n  function pad2(n) { return (n < 10 ? '0' : '') + n; }\n\n  function offsetMinutes(date) {\n    var key = TZ + '|' + Math.floor(date.getTime() / 60000);\n    if (offsetCache.hasOwnProperty(key)) return offsetCache[key];\n    var off = -origGetTimezoneOffset.call(date);\n    try {\n      var parts = new Intl.DateTimeFormat('en-US', { timeZone: TZ, timeZoneName: 'longOffset' }).formatToParts(date);\n      for (var i = 0; i < parts.length; i++) {\n        if (parts[i].type === 'timeZoneName') {\n          var m = /GMT([+-])(\\d{1,2})(?::(\\d{2}))?/.exec(parts[i].value);\n          if (m) off = (m[1] === '-' ? -1 : 1) * (parseInt(m[2], 10) * 60 + parseInt(m[3] || '0', 10));\n        }\n      }\n    } catch (e) {}\n    offsetCache[key] = off;\n    return off;\n  }\n\n  var OrigDTF = Intl.DateTimeFormat;\n  function PatchedDTF(locales, options) {\n    var o = options;\n    if (!o || typeof o !== 'object') {\n      // 无参 / 非对象参数：默认按目标时区构造（检测脚本常用 new Intl.DateTimeFormat().resolvedOptions()）\n      o = { timeZone: TZ };\n    } else if (!('timeZone' in o)) {\n      o = Object.assign({}, o, { timeZone: TZ });\n    }\n    return new OrigDTF(locales, o);\n  }\n  PatchedDTF.prototype = OrigDTF.prototype;\n  PatchedDTF.supportedLocalesOf = function supportedLocalesOf(locales, options) {\n    return OrigDTF.supportedLocalesOf(locales, options);\n  };\n  try { Intl.DateTimeFormat = PatchedDTF; } catch (e) {}\n\n  var DAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];\n  var MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];\n  var tzNameCache = null;\n\n  function tzDisplayName() {\n    if (tzNameCache) return tzNameCache;\n    try {\n      var parts = new OrigDTF('en-US', { timeZone: TZ, timeZoneName: 'long' }).formatToParts(new Date());\n      for (var i = 0; i < parts.length; i++) {\n        if (parts[i].type === 'timeZoneName') { tzNameCache = parts[i].value; break; }\n      }\n    } catch (e) {}\n    if (!tzNameCache) tzNameCache = TZ;\n    return tzNameCache;\n  }\n\n  function tzParts(d) {\n    var p = {};\n    try {\n      var parts = new OrigDTF('en-US', {\n        timeZone: TZ, hour12: false,\n        weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit',\n        hour: '2-digit', minute: '2-digit', second: '2-digit'\n      }).formatToParts(d);\n      for (var i = 0; i < parts.length; i++) p[parts[i].type] = parts[i].value;\n    } catch (e) {}\n    return p;\n  }\n\n  function gmtString(off) {\n    var a = Math.abs(off);\n    return 'GMT' + (off < 0 ? '-' : '+') + pad2(Math.floor(a / 60)) + pad2(a % 60);\n  }\n\n  // getTimezoneOffset 语义为「UTC − 本地时间」（东八区返回 -480），需对 UTC 偏移取反\n  Date.prototype.getTimezoneOffset = mark(function getTimezoneOffset() { return -offsetMinutes(this); });\n\n  Date.prototype.toString = mark(function toString() {\n    var p = tzParts(this);\n    var off = offsetMinutes(this);\n    var h = parseInt(p.hour, 10); if (h === 24) h = 0;\n    return (DAY[p.weekday] || 'Thu') + ' ' + (MON[(parseInt(p.month, 10) || 1) - 1] || 'Jan') + ' ' +\n      pad2(parseInt(p.day, 10) || 1) + ' ' + (p.year || '1970') + ' ' +\n      pad2(h) + ':' + (p.minute || '00') + ':' + (p.second || '00') + ' ' +\n      gmtString(off) + ' (' + tzDisplayName() + ')';\n  });\n\n  Date.prototype.toDateString = mark(function toDateString() {\n    var p = tzParts(this);\n    return (DAY[p.weekday] || 'Thu') + ' ' + (MON[(parseInt(p.month, 10) || 1) - 1] || 'Jan') + ' ' +\n      pad2(parseInt(p.day, 10) || 1) + ' ' + (p.year || '1970');\n  });\n\n  Date.prototype.toTimeString = mark(function toTimeString() {\n    var p = tzParts(this);\n    var off = offsetMinutes(this);\n    var h = parseInt(p.hour, 10); if (h === 24) h = 0;\n    return pad2(h) + ':' + (p.minute || '00') + ':' + (p.second || '00') + ' ' +\n      gmtString(off) + ' (' + tzDisplayName() + ')';\n  });\n\n  Date.prototype.toLocaleString = mark(function toLocaleString(locales, options) {\n    try { return new PatchedDTF(locales, options).format(this); } catch (e) { return OrigDTF.prototype.format.call(new OrigDTF('en-US', { timeZone: TZ }), this); }\n  });\n  Date.prototype.toLocaleDateString = mark(function toLocaleDateString(locales, options) {\n    try { return new PatchedDTF(locales, options).format(this); } catch (e) { return OrigDTF.prototype.format.call(new OrigDTF('en-US', { timeZone: TZ }), this); }\n  });\n  Date.prototype.toLocaleTimeString = mark(function toLocaleTimeString(locales, options) {\n    try { return new PatchedDTF(locales, options).format(this); } catch (e) { return OrigDTF.prototype.format.call(new OrigDTF('en-US', { timeZone: TZ }), this); }\n  });\n\n  /* ==================== 4. WebGL ==================== */\n\n  function patchWebGL(ctor) {\n    if (!ctor || !ctor.prototype) return;\n    var proto = ctor.prototype;\n    if (proto.__fpPatched) return;\n    proto.__fpPatched = true;\n\n    var origGetParameter = proto.getParameter;\n    if (origGetParameter) {\n      proto.getParameter = mark(function getParameter(pname) {\n        if (pname === 0x9245 && CFG.webglVendor) return CFG.webglVendor;      // UNMASKED_VENDOR_WEBGL\n        if (pname === 0x9246 && CFG.webglRenderer) return CFG.webglRenderer;  // UNMASKED_RENDERER_WEBGL\n        return origGetParameter.call(this, pname);\n      });\n    }\n    var origExt = proto.getSupportedExtensions;\n    if (origExt && CFG.webglExtensions && CFG.webglExtensions.length) {\n      proto.getSupportedExtensions = mark(function getSupportedExtensions() {\n        return CFG.webglExtensions.slice();\n      });\n    }\n    var origAttr = proto.getContextAttributes;\n    if (origAttr) {\n      proto.getContextAttributes = mark(function getContextAttributes() {\n        var a = origAttr.call(this);\n        try {\n          if (CFG.webglRenderer) a.renderer = CFG.webglRenderer;\n          if (CFG.webglVendor) a.vendor = CFG.webglVendor;\n        } catch (e) {}\n        return a;\n      });\n    }\n  }\n  patchWebGL(window.WebGLRenderingContext);\n  patchWebGL(window.WebGL2RenderingContext);\n\n  /* ==================== 5. Canvas 2D（种子噪声） ==================== */\n\n  (function () {\n    var proto = window.CanvasRenderingContext2D && window.CanvasRenderingContext2D.prototype;\n    if (!proto || proto.__fpPatched) return;\n    proto.__fpPatched = true;\n    var seed = hashStr(CFG.canvasNoiseSeed || 'fp');\n\n    var origGetImageData = proto.getImageData;\n    if (origGetImageData) {\n      proto.getImageData = mark(function getImageData(x, y, w, h) {\n        var img = origGetImageData.call(this, x, y, w, h);\n        try {\n          if (CFG.canvasMode !== 'off' && img && img.data) {\n            var d = img.data;\n            // 同一 (种子, x, y) 恒定输出同一噪声 → 跨会话一致\n            var r = mulberry32((seed ^ Math.imul(x | 0, 73856093) ^ Math.imul(y | 0, 19349663)) >>> 0);\n            var n = Math.min(d.length, 1052672); // 上限约 26 万像素，控制性能\n            for (var i = 0; i < n; i += 4) {\n              if (r() < 0.05) {\n                var v = d[i] + (r() < 0.5 ? 1 : -1);\n                d[i] = v < 0 ? 0 : (v > 255 ? 255 : v);\n              }\n            }\n          }\n        } catch (e) {}\n        return img;\n      });\n    }\n\n    var origMeasure = proto.measureText;\n    if (origMeasure) {\n      proto.measureText = mark(function measureText(text) {\n        var m = origMeasure.call(this, text);\n        try {\n          if (CFG.canvasMode !== 'off' && m) {\n            var r = mulberry32((seed ^ hashStr(String(text))) >>> 0)();\n            var eps = 0.00005 + r * 0.00045;\n            var keys = ['actualBoundingBoxAscent', 'actualBoundingBoxDescent',\n              'actualBoundingBoxLeft', 'actualBoundingBoxRight', 'alphabeticBaseline',\n              'emHeightAscent', 'emHeightDescent', 'fontBoundingBoxAscent',\n              'fontBoundingBoxDescent', 'hangingBaseline', 'ideographicBaseline', 'romanBaseline'];\n            var fake = {};\n            for (var i = 0; i < keys.length; i++) fake[keys[i]] = m[keys[i]];\n            fake.width = m.width + (r < 0.5 ? eps : -eps);\n            return fake;\n          }\n        } catch (e) {}\n        return m;\n      });\n    }\n  })();\n\n  /* ==================== 6. AudioContext（种子噪声） ==================== */\n\n  (function () {\n    var proto = window.AudioBuffer && window.AudioBuffer.prototype;\n    if (!proto || proto.__fpPatched) return;\n    proto.__fpPatched = true;\n    var seed = hashStr(CFG.audioNoiseSeed || 'fp');\n\n    var origGet = proto.getChannelData;\n    if (origGet) {\n      proto.getChannelData = mark(function getChannelData(ch) {\n        var data = origGet.call(this, ch);\n        try {\n          if (CFG.audioMode !== 'off' && data && data.length) {\n            var r = mulberry32((seed ^ Math.imul((ch | 0) + 1, 2246822519)) >>> 0);\n            var n = Math.min(data.length, 1 << 16);\n            for (var i = 0; i < n; i++) {\n              if (r() < 0.0006) data[i] = data[i] + (r() - 0.5) * 0.0001;\n            }\n          }\n        } catch (e) {}\n        return data;\n      });\n    }\n\n    var origCopy = proto.copyFromChannel;\n    if (origCopy) {\n      proto.copyFromChannel = mark(function copyFromChannel(dest, ch, off) {\n        var ret = origCopy.call(this, dest, ch, off);\n        try {\n          if (CFG.audioMode !== 'off' && dest && dest.length) {\n            var r = mulberry32((seed ^ 0x9E3779B9 ^ Math.imul((ch | 0) + 1, 2246822519)) >>> 0);\n            for (var i = 0; i < dest.length; i++) {\n              if (r() < 0.0006) dest[i] = dest[i] + (r() - 0.5) * 0.0001;\n            }\n          }\n        } catch (e) {}\n        return ret;\n      });\n    }\n  })();\n\n  /* ==================== 7. WebRTC（防真实 IP 泄漏） ==================== */\n\n  (function () {\n    var mode = CFG.webRtcMode || 'default';\n    if (mode === 'default') return;\n    var RTC = window.RTCPeerConnection || window.webkitRTCPeerConnection;\n    if (typeof RTC !== 'function') return;\n\n    function passCandidate(ev) {\n      try {\n        if (ev && ev.candidate && ev.candidate.candidate &&\n            ev.candidate.candidate.indexOf(' relay ') === -1) return false;\n      } catch (e) {}\n      return true;\n    }\n\n    var PatchedRTC = function RTCPeerConnection(config, constraints) {\n      if (mode === 'disabled') {\n        throw new DOMException('WebRTC has been disabled by fingerprint policy', 'NotSupportedError');\n      }\n      var c = {};\n      if (config) { for (var k in config) c[k] = config[k]; }\n      c.iceTransportPolicy = 'relay'; // 仅走 TURN 中继，不暴露主机地址\n      var pc = new RTC(c, constraints);\n\n      var origAEL = pc.addEventListener.bind(pc);\n      pc.addEventListener = function (type, fn, opts) {\n        if (type === 'icecandidate' && typeof fn === 'function') {\n          var wrapped = function (ev) { if (passCandidate(ev)) return fn.call(this, ev); };\n          return origAEL(type, wrapped, opts);\n        }\n        return origAEL(type, fn, opts);\n      };\n\n      var ocDesc = Object.getOwnPropertyDescriptor(pc, 'onicecandidate');\n      if (ocDesc && ocDesc.configurable) {\n        Object.defineProperty(pc, 'onicecandidate', {\n          get: function () { return ocDesc.get.call(pc); },\n          set: function (fn) {\n            if (typeof fn !== 'function') { ocDesc.set.call(pc, fn); return; }\n            ocDesc.set.call(pc, function (ev) { if (passCandidate(ev)) return fn.call(this, ev); });\n          },\n          configurable: true\n        });\n      }\n      return pc;\n    };\n    PatchedRTC.prototype = RTC.prototype;\n    window.RTCPeerConnection = PatchedRTC;\n    if (window.webkitRTCPeerConnection) window.webkitRTCPeerConnection = PatchedRTC;\n  })();\n\n  /* ==================== 8. 桌面 Chromium 专属对象 ==================== */\n\n  if (IS_DESKTOP && IS_CHROMIUM && !window.chrome) {\n    window.chrome = {\n      app: {\n        isInstalled: false,\n        InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },\n        getDetails: function getDetails() { return null; },\n        getIsInstalled: function getIsInstalled() { return false; },\n        installState: function installState(cb) { try { if (cb) cb('not_installed'); } catch (e) {} }\n      },\n      runtime: {},\n      csi: function csi() {\n        return {\n          startE: Date.now(), onloadT: Date.now(),\n          pageT: Date.now() + 120 + (hashStr(CFG.userAgent || 'fp') % 300), tran: 15\n        };\n      },\n      loadTimes: function loadTimes() {\n        var t = Date.now() / 1000;\n        return {\n          requestTime: t, startLoadTime: t, commitLoadTime: t,\n          finishDocumentLoadTime: t, finishLoadTime: t, firstPaintTime: t,\n          firstPaintAfterLoadTime: 0, navigationType: 'Other',\n          wasFetchedViaSpdy: true, wasNpnNegotiated: true,\n          npnNegotiatedProtocol: 'h2', wasAlternateProtocolAvailable: false,\n          connectionInfo: 'h2'\n        };\n      }\n    };\n  }\n\n  if (IS_DESKTOP && IS_CHROMIUM && !window.external) {\n    window.external = {\n      AddSearchProvider: function AddSearchProvider() {},\n      IsSearchProviderInstalled: function IsSearchProviderInstalled() { return false; }\n    };\n  }\n\n  if (IS_DESKTOP && IS_CHROMIUM && window.performance && !performance.memory) {\n    try {\n      Object.defineProperty(performance, 'memory', {\n        value: {\n          jsHeapSizeLimit: 4294705152,\n          totalJSHeapSize: 32000000 + (hashStr(CFG.canvasNoiseSeed || 'fp') % 9000000),\n          usedJSHeapSize: 26000000 + (hashStr(CFG.audioNoiseSeed || 'fp') % 6000000)\n        },\n        configurable: true\n      });\n    } catch (e) {}\n  }\n})();\n";</script>
+<script>
+(function () {
+  var before = null;
+
+  function canvasHash() {
+    try {
+      var c = document.createElement('canvas');
+      c.width = 220; c.height = 80;
+      var ctx = c.getContext('2d');
+      ctx.textBaseline = 'top';
+      ctx.font = '14px "Arial"';
+      ctx.fillStyle = '#f60'; ctx.fillRect(10, 10, 80, 40);
+      ctx.fillStyle = '#069'; ctx.fillText('FpBrowser preview \u{1F600}', 5, 5);
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.beginPath(); ctx.arc(100, 30, 30, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,0,255,.6)'; ctx.fill();
+      return c.toDataURL().slice(-32);
+    } catch (e) { return 'N/A'; }
+  }
+  function webglInfo() {
+    try {
+      var c = document.createElement('canvas');
+      var gl = c.getContext('webgl');
+      if (!gl) return 'N/A';
+      var ext = gl.getExtension('WEBGL_debug_renderer_info');
+      return (ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR)) + ' | ' +
+             (ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
+    } catch (e) { return 'N/A'; }
+  }
+  function snap() {
+    var off = new Date().getTimezoneOffset();
+    var sign = off <= 0 ? '+' : '-';
+    var a = Math.abs(off);
+    return {
+      'navigator.userAgent': navigator.userAgent,
+      'navigator.platform': navigator.platform,
+      'navigator.vendor': navigator.vendor,
+      'navigator.languages': (navigator.languages || []).join(','),
+      'navigator.hardwareConcurrency': String(navigator.hardwareConcurrency),
+      'navigator.deviceMemory': navigator.deviceMemory === undefined ? '(未定义)' : navigator.deviceMemory + ' GB',
+      'navigator.maxTouchPoints': String(navigator.maxTouchPoints),
+      'navigator.webdriver': String(navigator.webdriver),
+      'navigator.plugins': String(navigator.plugins ? navigator.plugins.length : 'N/A'),
+      'userAgentData': navigator.userAgentData ? navigator.userAgentData.platform + ' / mobile=' + navigator.userAgentData.mobile : '(未定义)',
+      'Intl 时区': Intl.DateTimeFormat().resolvedOptions().timeZone,
+      'getTimezoneOffset': 'UTC' + sign + Math.floor(a / 60) + ':' + (a % 60 < 10 ? '0' : '') + (a % 60),
+      'new Date().toString()': new Date().toString(),
+      'screen': screen.width + '×' + screen.height + ' @' + devicePixelRatio + 'x depth=' + screen.colorDepth,
+      'window 几何': 'inner ' + innerWidth + '×' + innerHeight,
+      'matchMedia(pointer:coarse)': String(matchMedia('(pointer: coarse)').matches),
+      'WebGL': webglInfo(),
+      'window.chrome': typeof chrome !== 'undefined' ? '存在' : '不存在',
+      'Canvas 指纹(尾)': canvasHash(),
+      'Function.toString': Function.prototype.toString.call(navigator.__lookupGetter__('userAgent') || function(){})
+    };
+  }
+
+  function render(b, a) {
+    var tb = document.getElementById('result');
+    tb.innerHTML = '';
+    Object.keys(b).forEach(function (k) {
+      var changed = b[k] !== a[k];
+      var tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + k + '</td><td class="v same">' + esc(b[k]) + '</td>' +
+        '<td class="v ' + (changed ? 'changed' : 'same') + '">' + esc(a[k]) + '</td>';
+      tb.appendChild(tr);
+    });
+  }
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  function currentConfig() {
+    var tpl = document.getElementById('tpl').value;
+    return window.FP_TEMPLATES[tpl]();
+  }
+
+  document.getElementById('inject').addEventListener('click', function () {
+    if (!before) before = snap();
+    var cfg = currentConfig();
+    window.__FP_CONFIG__ = cfg;
+    (0, eval)(window.FP_ENGINE_SRC);
+    render(before, snap());
+  });
+
+  document.getElementById('toggle-json').addEventListener('click', function () {
+    var box = document.getElementById('json-box');
+    var show = box.style.display === 'none';
+    box.style.display = show ? 'block' : 'none';
+    if (show) document.getElementById('json').value = JSON.stringify(currentConfig(), null, 2);
+  });
+
+  document.getElementById('apply-json').addEventListener('click', function () {
+    if (!before) before = snap();
+    try {
+      var cfg = JSON.parse(document.getElementById('json').value);
+      window.__FP_CONFIG__ = cfg;
+      (0, eval)(window.FP_ENGINE_SRC);
+      render(before, snap());
+    } catch (e) {
+      alert('JSON 解析失败：' + e.message);
+    }
+  });
+})();
+</script>
+</body>
+</html>

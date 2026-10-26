@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.fpbrowser.app">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 仅旧版系统下载文件到公共目录需要 -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <application
+        android:name=".FpApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:largeHeap="true"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.FpBrowser"
+        android:usesCleartextTraffic="true">
+
+        <!-- 环境管理（主进程） -->
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 环境编辑器（主进程） -->
+        <activity
+            android:name=".ui.ProfileEditActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!--
+            浏览器槽位：每个"环境"在独立进程中运行 WebView。
+            - android:process   ：独立进程，配合 WebView 数据目录后缀实现 Cookie/Storage 隔离
+            - launchMode=singleTask：再次启动同一环境时直接切回已有任务
+            - taskAffinity      ：每个槽位独立任务栈，最近任务列表中可区分
+            - configChanges     ：旋转屏幕等不重建 Activity，避免 WebView 状态丢失
+        -->
+        <activity
+            android:name=".web.BrowserSlot1Activity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale"
+            android:excludeFromRecents="false"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":web1"
+            android:taskAffinity=":web1" />
+        <activity
+            android:name=".web.BrowserSlot2Activity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":web2"
+            android:taskAffinity=":web2" />
+        <activity
+            android:name=".web.BrowserSlot3Activity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":web3"
+            android:taskAffinity=":web3" />
+        <activity
+            android:name=".web.BrowserSlot4Activity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":web4"
+            android:taskAffinity=":web4" />
+        <activity
+            android:name=".web.BrowserSlot5Activity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":web5"
+            android:taskAffinity=":web5" />
+        <activity
+            android:name=".web.BrowserSlot6Activity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":web6"
+            android:taskAffinity=":web6" />
+        <activity
+            android:name=".web.BrowserSlot7Activity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":web7"
+            android:taskAffinity=":web7" />
+        <activity
+            android:name=".web.BrowserSlot8Activity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:process=":web8"
+            android:taskAffinity=":web8" />
+    </application>
+</manifest>
